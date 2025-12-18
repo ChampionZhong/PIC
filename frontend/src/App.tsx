@@ -1,302 +1,558 @@
-import { useState, useCallback, useEffect } from 'react';
-import ChatInterface from './components/ChatInterface';
-import CanvasPanel from './components/CanvasPanel';
-import MermaidCodeEditor from './components/MermaidCodeEditor';
-import ConversationTabs from './components/ConversationTabs';
-import DataImportExport from './components/DataImportExport';
-import { Conversation, Message, MermaidCodeTab } from './types';
+import { useState } from 'react';
+import ChatPanel, { ChatMessage, ChatSender } from './components/ChatPanel';
+import WorkspaceTabs, { ActiveTab } from './components/WorkspaceTabs';
 
-const STORAGE_KEY_CONVERSATIONS = 'research-copilot-conversations';
-const STORAGE_KEY_ACTIVE_CONVERSATION = 'research-copilot-active-conversation';
+const API_BASE_URL = 'http://localhost:8000';
 
 function App() {
-  // Load conversations from localStorage
-  const loadConversationsFromStorage = (): Conversation[] => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY_CONVERSATIONS);
-      if (stored) {
-        const conversations = JSON.parse(stored);
-        // 确保旧数据兼容性：为没有inputDraft的对话添加默认值
-        return conversations.map((conv: Conversation) => ({
-          ...conv,
-          inputDraft: conv.inputDraft || '',
-        }));
-      }
-    } catch (error) {
-      console.error('Failed to load conversations from localStorage:', error);
-    }
-    return [];
+  // Global State Management
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const [activeTab, setActiveTab] = useState<ActiveTab>('logic');
+  const [mermaidCode, setMermaidCode] = useState<string>('');
+  const [visualSchema, setVisualSchema] = useState<string>('');
+  const [imageUrl, setImageUrl] = useState<string>('');
+  const [critique, setCritique] = useState<string>('');
+  
+  // Critic states for each tab
+  const [logicCritique, setLogicCritique] = useState<{feedback: string; passed: boolean; suggestions?: string} | null>(null);
+  const [styleCritique, setStyleCritique] = useState<{feedback: string; passed: boolean; suggestions?: string} | null>(null);
+  const [resultCritique, setResultCritique] = useState<{feedback: string; passed: boolean; suggestions?: string} | null>(null);
+  
+  // Loading states
+  const [isGeneratingSchema, setIsGeneratingSchema] = useState(false);
+  const [isRendering, setIsRendering] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isGeneratingLogicCritic, setIsGeneratingLogicCritic] = useState(false);
+  const [isGeneratingStyleCritic, setIsGeneratingStyleCritic] = useState(false);
+  const [isGeneratingResultCritic, setIsGeneratingResultCritic] = useState(false);
+  const [originalIdea, setOriginalIdea] = useState<string>('');
+  
+  // Style selection state
+  const [selectedStyle, setSelectedStyle] = useState<string>('AI_CONFERENCE');
+  const [customStyleText, setCustomStyleText] = useState<string>('');
+
+  // Add message to chat history
+  const addChatMessage = (sender: ChatSender, message: string) => {
+    setChatHistory((prev) => [
+      ...prev,
+      { sender, message, timestamp: Date.now() },
+    ]);
   };
 
-  const loadActiveConversationFromStorage = (): string | null => {
-    try {
-      return localStorage.getItem(STORAGE_KEY_ACTIVE_CONVERSATION);
-    } catch (error) {
-      console.error('Failed to load active conversation from localStorage:', error);
+  // Handle user message - call unified Manager-driven Chat API
+  const handleSendMessage = async (message: string) => {
+    if (!message.trim()) return;
+    
+    // Add user message to chat
+    addChatMessage('User', message);
+    if (!originalIdea) {
+      setOriginalIdea(message);
     }
-    return null;
-  };
+    setIsLoading(true);
 
-  // Initialize with default conversation if none exist
-  const initializeConversations = (): Conversation[] => {
-    const stored = loadConversationsFromStorage();
-    if (stored.length === 0) {
-      const defaultConv: Conversation = {
-        id: `conv-${Date.now()}`,
-        title: 'New Conversation',
-        messages: [],
-        mermaidTabs: [],
-        activeTabId: null,
-        tabCounter: 1,
-        currentCode: '',
-        inputDraft: '',
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
+    try {
+      // Build chat history for API (convert ChatMessage[] to API format)
+      const apiHistory = chatHistory.map(msg => ({
+        role: msg.sender === 'User' ? 'user' : 'assistant',
+        content: msg.message
+      }));
+
+      // Build current artifacts
+      const currentArtifacts: Record<string, string> = {};
+      if (mermaidCode) currentArtifacts.mermaid_code = mermaidCode;
+      if (visualSchema) currentArtifacts.visual_schema = visualSchema;
+      if (imageUrl) currentArtifacts.image_url = imageUrl;
+
+      // Build request body with style parameters
+      const requestBody: any = {
+        message: message,
+        history: apiHistory,
+        active_tab: activeTab,
+        current_artifacts: currentArtifacts,
+        style_mode: selectedStyle,
       };
-      return [defaultConv];
-    }
-    return stored;
-  };
-
-  const [conversations, setConversations] = useState<Conversation[]>(initializeConversations);
-  const [activeConversationId, setActiveConversationId] = useState<string | null>(
-    loadActiveConversationFromStorage() || conversations[0]?.id || null
-  );
-
-  // Get current active conversation
-  const activeConversation = conversations.find((c) => c.id === activeConversationId) || conversations[0];
-
-  // Save conversations to localStorage whenever they change
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY_CONVERSATIONS, JSON.stringify(conversations));
-    } catch (error) {
-      console.error('Failed to save conversations to localStorage:', error);
-    }
-  }, [conversations]);
-
-  // Save active conversation ID to localStorage
-  useEffect(() => {
-    try {
-      if (activeConversationId) {
-        localStorage.setItem(STORAGE_KEY_ACTIVE_CONVERSATION, activeConversationId);
-      }
-    } catch (error) {
-      console.error('Failed to save active conversation to localStorage:', error);
-    }
-  }, [activeConversationId]);
-
-  // Update conversation helper
-  const updateConversation = (id: string, updates: Partial<Conversation>) => {
-    setConversations((prev) =>
-      prev.map((conv) =>
-        conv.id === id
-          ? { ...conv, ...updates, updatedAt: Date.now() }
-          : conv
-      )
-    );
-  };
-
-  // Create new conversation
-  const handleNewConversation = () => {
-    const newConv: Conversation = {
-      id: `conv-${Date.now()}`,
-      title: 'New Conversation',
-      messages: [],
-      mermaidTabs: [],
-      activeTabId: null,
-      tabCounter: 1,
-      currentCode: '',
-      inputDraft: '',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    setConversations((prev) => [...prev, newConv]);
-    setActiveConversationId(newConv.id);
-  };
-
-  // Switch conversation
-  const handleConversationChange = (id: string) => {
-    setActiveConversationId(id);
-  };
-
-  // Delete conversation
-  const handleDeleteConversation = (id: string) => {
-    setConversations((prev) => {
-      const filtered = prev.filter((conv) => conv.id !== id);
-      // If deleted conversation was active, switch to first available
-      if (activeConversationId === id && filtered.length > 0) {
-        setActiveConversationId(filtered[0].id);
-      } else if (filtered.length === 0) {
-        // If no conversations left, create a new one
-        handleNewConversation();
-        return prev; // Don't delete, let handleNewConversation handle it
-      }
-      return filtered;
-    });
-  };
-
-  // Rename conversation
-  const handleRenameConversation = (id: string, newTitle: string) => {
-    updateConversation(id, { title: newTitle });
-  };
-
-  // Handle import conversations
-  const handleImportConversations = (imported: Conversation[]) => {
-    setConversations(imported);
-    // Set first conversation as active if available
-    if (imported.length > 0) {
-      setActiveConversationId(imported[0].id);
-    }
-  };
-
-  // Update messages
-  const handleMessagesChange = useCallback(
-    (updater: Message[] | ((prev: Message[]) => Message[])) => {
-      if (!activeConversation) return;
-      const newMessages = typeof updater === 'function' ? updater(activeConversation.messages) : updater;
-      updateConversation(activeConversation.id, { messages: newMessages });
       
-      // Update title from first user message if title is still default
-      if (activeConversation.title === 'New Conversation' && newMessages.length > 0) {
-        const firstUserMessage = newMessages.find((m) => m.role === 'user');
-        if (firstUserMessage) {
-          const title = firstUserMessage.content.slice(0, 30).trim() || 'New Conversation';
-          updateConversation(activeConversation.id, { title });
+      if (selectedStyle === 'CUSTOM' && customStyleText.trim()) {
+        requestBody.custom_style_prompt = customStyleText.trim();
+      }
+
+      // Call unified /api/chat endpoint
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText || 'Failed to process request'}`);
+      }
+
+      const data = await response.json();
+      
+      // Display Manager reasoning as a system note
+      if (data.manager_reasoning) {
+        addChatMessage('Manager', `Routing to ${data.agent_name.replace('_', ' ')}: ${data.manager_reasoning}`);
+      }
+      
+      // Map agent_name to ChatSender
+      const agentSenderMap: Record<string, ChatSender> = {
+        'architect': 'Architect',
+        'art_director': 'Director',
+        'painter': 'Painter',
+        'critic': 'Critic',
+      };
+      
+      const agentSender = agentSenderMap[data.agent_name] || 'Architect';
+      
+      // Add agent's response to chat
+      if (data.response_text) {
+        addChatMessage(agentSender, data.response_text);
+      }
+      
+      // Handle updated artifacts and switch tabs
+      if (data.updated_artifacts) {
+        // Update mermaid_code -> Switch to Logic Tab
+        if (data.updated_artifacts.mermaid_code) {
+          setMermaidCode(data.updated_artifacts.mermaid_code);
+          setActiveTab('logic');
+        }
+        
+        // Update visual_schema -> Switch to Style Tab
+        if (data.updated_artifacts.visual_schema) {
+          setVisualSchema(data.updated_artifacts.visual_schema);
+          setActiveTab('style');
+        }
+        
+        // Update image_url -> Switch to Result Tab
+        if (data.updated_artifacts.image_url) {
+          setImageUrl(data.updated_artifacts.image_url);
+          setActiveTab('result');
+          // Note: Critic review is now handled manually via the Result tab's Critic section
+        }
+        
+        // Update critique
+        if (data.updated_artifacts.critique) {
+          setCritique(data.updated_artifacts.critique);
         }
       }
-    },
-    [activeConversation]
-  );
+    } catch (error) {
+      console.error('Error calling chat API:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to process request';
+      addChatMessage('Manager', `Error: ${errorMessage}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
-  // Handle mermaid code change
-  const handleMermaidCodeChange = useCallback(
-    (code: string) => {
-      if (!activeConversation || !code.trim()) return;
+  // Handle "Confirm & Generate Schema" - use unified API
+  const handleConfirmAndGenerateSchema = async () => {
+    if (!mermaidCode.trim()) return;
 
-      const newTab: MermaidCodeTab = {
-        id: activeConversation.tabCounter,
-        label: `Diagram ${activeConversation.tabCounter}`,
-        code: code,
+    setIsGeneratingSchema(true);
+    addChatMessage('User', 'Generate visual schema from this Mermaid diagram');
+
+    try {
+      // Build chat history for API
+      const apiHistory = chatHistory.map(msg => ({
+        role: msg.sender === 'User' ? 'user' : 'assistant',
+        content: msg.message
+      }));
+
+      // Build current artifacts
+      const currentArtifacts: Record<string, string> = {};
+      currentArtifacts.mermaid_code = mermaidCode;
+      if (visualSchema) currentArtifacts.visual_schema = visualSchema;
+      if (imageUrl) currentArtifacts.image_url = imageUrl;
+
+      // Use unified API with style parameters
+      const requestBody: any = {
+        message: 'Generate visual schema from this Mermaid diagram',
+        history: apiHistory,
+        active_tab: 'logic',
+        current_artifacts: currentArtifacts,
+        style_mode: selectedStyle,
       };
+      
+      if (selectedStyle === 'CUSTOM' && customStyleText.trim()) {
+        requestBody.custom_style_prompt = customStyleText.trim();
+      }
 
-      updateConversation(activeConversation.id, {
-        mermaidTabs: [...activeConversation.mermaidTabs, newTab],
-        activeTabId: newTab.id,
-        tabCounter: activeConversation.tabCounter + 1,
-        currentCode: code,
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
       });
-    },
-    [activeConversation]
-  );
 
-  // Handle mermaid tab change
-  const handleTabChange = (tabId: number) => {
-    if (!activeConversation) return;
-    const tab = activeConversation.mermaidTabs.find((t) => t.id === tabId);
-    if (tab) {
-      updateConversation(activeConversation.id, {
-        activeTabId: tabId,
-        currentCode: tab.code,
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText || 'Failed to generate schema'}`);
+      }
+
+      const data = await response.json();
+      
+      // Display Manager reasoning if present
+      if (data.manager_reasoning) {
+        addChatMessage('Manager', `Routing to ${data.agent_name.replace('_', ' ')}: ${data.manager_reasoning}`);
+      }
+      
+      // Handle updated artifacts
+      if (data.updated_artifacts?.visual_schema) {
+        setVisualSchema(data.updated_artifacts.visual_schema);
+        setActiveTab('style');
+        addChatMessage('Director', data.response_text);
+      } else if (data.response_text) {
+        addChatMessage('Director', data.response_text);
+      } else {
+        throw new Error('No visual schema in response');
+      }
+    } catch (error) {
+      console.error('Error calling Art Director agent:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to generate schema';
+      addChatMessage('Director', `Error: ${errorMessage}`);
+    } finally {
+      setIsGeneratingSchema(false);
+    }
+  };
+
+  // Handle "Start Rendering" - use unified API
+  const handleStartRendering = async () => {
+    if (!visualSchema.trim()) return;
+
+    setIsRendering(true);
+    addChatMessage('User', 'Render the image from this visual schema');
+
+    try {
+      // Build chat history for API
+      const apiHistory = chatHistory.map(msg => ({
+        role: msg.sender === 'User' ? 'user' : 'assistant',
+        content: msg.message
+      }));
+
+      // Build current artifacts
+      const currentArtifacts: Record<string, string> = {};
+      if (mermaidCode) currentArtifacts.mermaid_code = mermaidCode;
+      currentArtifacts.visual_schema = visualSchema;
+      if (imageUrl) currentArtifacts.image_url = imageUrl;
+
+      // Use unified API
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: 'Render the image from this visual schema',
+          history: apiHistory,
+          active_tab: 'style',
+          current_artifacts: currentArtifacts,
+        }),
       });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText || 'Failed to render image'}`);
+      }
+
+      const data = await response.json();
+      
+      // Display Manager reasoning if present
+      if (data.manager_reasoning) {
+        addChatMessage('Manager', `Routing to ${data.agent_name.replace('_', ' ')}: ${data.manager_reasoning}`);
+      }
+      
+      // Handle updated artifacts
+      if (data.updated_artifacts?.image_url) {
+        setImageUrl(data.updated_artifacts.image_url);
+        setActiveTab('result');
+        addChatMessage('Painter', data.response_text);
+        // Note: Critic review is now handled manually via the Result tab's Critic section
+      } else if (data.response_text) {
+        addChatMessage('Painter', data.response_text);
+      } else {
+        throw new Error('No image URL in response');
+      }
+    } catch (error) {
+      console.error('Error calling Painter agent:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to render image';
+      addChatMessage('Painter', `Error: ${errorMessage}`);
+    } finally {
+      setIsRendering(false);
     }
   };
 
-  // Handle code edit
-  const handleCodeChange = (tabId: number, code: string) => {
-    if (!activeConversation) return;
-    const updatedTabs = activeConversation.mermaidTabs.map((tab) =>
-      tab.id === tabId ? { ...tab, code } : tab
-    );
-    updateConversation(activeConversation.id, { mermaidTabs: updatedTabs });
+  // Handle Critic review (Auto-triggered after image generation)
+  const handleCriticReview = async (imageUrlToReview: string) => {
+    if (!imageUrlToReview || !originalIdea) return;
+
+    addChatMessage('Critic', 'Reviewing generated image...');
+
+    try {
+      // Build chat history for API
+      const apiHistory = chatHistory.map(msg => ({
+        role: msg.sender === 'User' ? 'user' : 'assistant',
+        content: msg.message
+      }));
+
+      // Build current artifacts
+      const currentArtifacts: Record<string, string> = {};
+      if (mermaidCode) currentArtifacts.mermaid_code = mermaidCode;
+      if (visualSchema) currentArtifacts.visual_schema = visualSchema;
+      currentArtifacts.image_url = imageUrlToReview;
+
+      // Use unified API for critic review
+      const response = await fetch(`${API_BASE_URL}/api/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: `Please review the generated image against the original idea: ${originalIdea}`,
+          history: apiHistory,
+          active_tab: 'result',
+          current_artifacts: currentArtifacts,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText || 'Failed to review image'}`);
+      }
+
+      const data = await response.json();
+      
+      // Display Manager reasoning if present
+      if (data.manager_reasoning) {
+        addChatMessage('Manager', `Routing to ${data.agent_name.replace('_', ' ')}: ${data.manager_reasoning}`);
+      }
+      
+      // Display the critique
+      if (data.updated_artifacts?.critique) {
+        setCritique(data.updated_artifacts.critique);
+        addChatMessage('Critic', data.response_text);
+      } else if (data.response_text) {
+        addChatMessage('Critic', data.response_text);
+      } else {
+        throw new Error('No feedback in response');
+      }
+    } catch (error) {
+      console.error('Error calling Critic agent:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to review image';
+      addChatMessage('Critic', `Error: ${errorMessage}`);
+      setCritique(`Error: ${errorMessage}`);
+    }
   };
 
-  // Handle render
-  const handleRender = useCallback((code: string) => {
-    if (!activeConversation) {
-      console.warn('No active conversation for render');
-      return;
-    }
-    
-    // Update current code to trigger re-render
-    const updatedTabs = activeConversation.activeTabId !== null
-      ? activeConversation.mermaidTabs.map((tab) =>
-          tab.id === activeConversation.activeTabId ? { ...tab, code } : tab
-        )
-      : activeConversation.mermaidTabs;
-    
-    updateConversation(activeConversation.id, { 
-      currentCode: code,
-      mermaidTabs: updatedTabs,
-    });
-  }, [activeConversation]);
-
-  // Get current edited code for context
-  const getCurrentEditedCode = (): string => {
-    if (!activeConversation) return '';
-    if (activeConversation.activeTabId !== null) {
-      const tab = activeConversation.mermaidTabs.find((t) => t.id === activeConversation.activeTabId);
-      return tab ? tab.code : activeConversation.currentCode;
-    }
-    return activeConversation.currentCode;
+  // Handle "Regenerate" - re-render with current schema
+  const handleRegenerate = async () => {
+    if (!visualSchema.trim()) return;
+    await handleStartRendering();
   };
 
-  if (!activeConversation) {
-    return (
-      <div className="flex h-screen w-screen items-center justify-center bg-slate-900 text-slate-400">
-        <p>No conversation available</p>
-      </div>
-    );
-  }
+  // Handle image download
+  const handleDownloadImage = () => {
+    if (!imageUrl) return;
+
+    try {
+      if (imageUrl.startsWith('data:')) {
+        // Handle base64 data URL
+        const link = document.createElement('a');
+        link.href = imageUrl;
+        link.download = 'generated-figure.png';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      } else {
+        // Handle HTTP URL
+        const link = document.createElement('a');
+        link.href = imageUrl;
+        link.download = 'generated-figure.png';
+        link.target = '_blank';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+    } catch (error) {
+      console.error('Error downloading image:', error);
+      // Fallback: open in new tab
+      window.open(imageUrl, '_blank');
+    }
+  };
+
+  // Handle Logic Critic
+  const handleLogicCritic = async () => {
+    if (!mermaidCode.trim()) return;
+
+    setIsGeneratingLogicCritic(true);
+    setLogicCritique(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/agent/critic/logic`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mermaid_code: mermaidCode,
+          original_idea: originalIdea || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText || 'Failed to generate logic critique'}`);
+      }
+
+      const data = await response.json();
+      setLogicCritique({
+        feedback: data.feedback || '',
+        passed: data.passed || false,
+        suggestions: data.suggestions || undefined,
+      });
+    } catch (error) {
+      console.error('Error calling Logic Critic:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to generate critique';
+      setLogicCritique({
+        feedback: `Error: ${errorMessage}`,
+        passed: false,
+      });
+    } finally {
+      setIsGeneratingLogicCritic(false);
+    }
+  };
+
+  // Handle Style Critic
+  const handleStyleCritic = async () => {
+    if (!visualSchema.trim()) return;
+
+    setIsGeneratingStyleCritic(true);
+    setStyleCritique(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/agent/critic/style`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          visual_schema: visualSchema,
+          mermaid_code: mermaidCode || undefined,
+          style_mode: selectedStyle || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText || 'Failed to generate style critique'}`);
+      }
+
+      const data = await response.json();
+      setStyleCritique({
+        feedback: data.feedback || '',
+        passed: data.passed || false,
+        suggestions: data.suggestions || undefined,
+      });
+    } catch (error) {
+      console.error('Error calling Style Critic:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to generate critique';
+      setStyleCritique({
+        feedback: `Error: ${errorMessage}`,
+        passed: false,
+      });
+    } finally {
+      setIsGeneratingStyleCritic(false);
+    }
+  };
+
+  // Handle Result Critic
+  const handleResultCritic = async () => {
+    if (!imageUrl) return;
+
+    setIsGeneratingResultCritic(true);
+    setResultCritique(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/agent/critic/result`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          image_url: imageUrl,
+          original_idea: originalIdea || 'Generated scientific figure',
+          visual_schema: visualSchema || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText || 'Failed to generate result critique'}`);
+      }
+
+      const data = await response.json();
+      setResultCritique({
+        feedback: data.feedback || '',
+        passed: data.passed || false,
+        suggestions: data.suggestions || undefined,
+      });
+    } catch (error) {
+      console.error('Error calling Result Critic:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to generate critique';
+      setResultCritique({
+        feedback: `Error: ${errorMessage}`,
+        passed: false,
+      });
+    } finally {
+      setIsGeneratingResultCritic(false);
+    }
+  };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-900">
-      {/* Left Panel - Chat Interface */}
-      <div className="w-1/2 border-r border-slate-800 flex flex-col">
-        {/* Import/Export Controls */}
-        <DataImportExport
-          conversations={conversations}
-          onImport={handleImportConversations}
+    <div className="h-screen w-full flex bg-zinc-950 overflow-hidden">
+      {/* Left Panel - Chat Interface (35%) */}
+      <div className="w-[35%] flex-shrink-0">
+        <ChatPanel
+          chatHistory={chatHistory}
+          onSendMessage={handleSendMessage}
+          isLoading={isLoading}
         />
-        {/* Conversation Tabs */}
-        <ConversationTabs
-          conversations={conversations}
-          activeConversationId={activeConversationId}
-          onConversationChange={handleConversationChange}
-          onNewConversation={handleNewConversation}
-          onDeleteConversation={handleDeleteConversation}
-          onRenameConversation={handleRenameConversation}
-        />
-        {/* Chat Interface */}
-        <div className="flex-1 min-h-0">
-          <ChatInterface
-            messages={activeConversation.messages}
-            setMessages={handleMessagesChange}
-            onMermaidCodeChange={handleMermaidCodeChange}
-            currentMermaidCode={getCurrentEditedCode()}
-            inputDraft={activeConversation.inputDraft || ''}
-            onInputDraftChange={(draft) => updateConversation(activeConversation.id, { inputDraft: draft })}
-          />
-        </div>
       </div>
 
-      {/* Right Panel - Split into Code Editor (top) and Canvas Panel (bottom) */}
-      <div className="w-1/2 flex flex-col">
-        {/* Top: Code Editor */}
-        <div className="h-1/2 border-b border-slate-800">
-          <MermaidCodeEditor
-            tabs={activeConversation.mermaidTabs}
-            activeTabId={activeConversation.activeTabId}
-            onTabChange={handleTabChange}
-            onCodeChange={handleCodeChange}
-            onRender={handleRender}
-          />
-        </div>
-
-        {/* Bottom: Canvas Panel (Blueprint & Rendering) */}
-        <div className="h-1/2">
-          <CanvasPanel code={activeConversation.currentCode || ''} />
-        </div>
+      {/* Right Panel - Tabbed Workspace (65%) */}
+      <div className="flex-1 min-w-0">
+        <WorkspaceTabs
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          mermaidCode={mermaidCode}
+          onMermaidCodeChange={setMermaidCode}
+          visualSchema={visualSchema}
+          onVisualSchemaChange={setVisualSchema}
+          imageUrl={imageUrl}
+          critique={critique}
+          onConfirmAndGenerateSchema={handleConfirmAndGenerateSchema}
+          onStartRendering={handleStartRendering}
+          onRegenerate={handleRegenerate}
+          isGeneratingSchema={isGeneratingSchema}
+          isRendering={isRendering}
+          selectedStyle={selectedStyle}
+          onStyleChange={setSelectedStyle}
+          customStyleText={customStyleText}
+          onCustomStyleTextChange={setCustomStyleText}
+          onDownloadImage={handleDownloadImage}
+          logicCritique={logicCritique}
+          styleCritique={styleCritique}
+          resultCritique={resultCritique}
+          onLogicCritic={handleLogicCritic}
+          onStyleCritic={handleStyleCritic}
+          onResultCritic={handleResultCritic}
+          isGeneratingLogicCritic={isGeneratingLogicCritic}
+          isGeneratingStyleCritic={isGeneratingStyleCritic}
+          isGeneratingResultCritic={isGeneratingResultCritic}
+        />
       </div>
     </div>
   );

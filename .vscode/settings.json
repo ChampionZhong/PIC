@@ -1,12 +1,28 @@
 {
     "cSpell.words": [
+        "APIYI",
+        "BRIA",
         "CVPR",
         "dotenv",
         "genai",
         "generativeai",
+        "generativelanguage",
+        "IDCA",
         "Imagen",
+        "imread",
+        "imtool",
+        "logits",
+        "mineru",
+        "modelscope",
         "neurips",
+        "pycache",
+        "RMBG",
         "Roboto",
-        "Visio"
+        "uvicorn",
+        "Visio",
+        "vite",
+        "vllm",
+        "vtracer",
+        "wireframes"
     ]
 }

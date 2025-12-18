@@ -192,34 +192,34 @@ const MermaidRenderer: React.FC<MermaidRendererProps> = ({ code }) => {
   }, [scale, code, isInitialized]);
 
   return (
-    <div className="w-full h-full bg-slate-900 flex flex-col relative">
+    <div className="w-full h-full bg-zinc-900 flex flex-col relative">
       {/* Zoom Controls */}
       {!error && code.trim() && (
-        <div className="absolute top-4 right-4 z-10 flex items-center gap-2 bg-slate-800/90 backdrop-blur-sm border border-slate-700 rounded-lg p-1.5">
+        <div className="absolute top-4 right-4 z-10 flex items-center gap-2 bg-zinc-800/90 backdrop-blur-sm border border-zinc-700 rounded-lg p-1.5">
           <button
             onClick={handleZoomOut}
             disabled={scale <= MIN_SCALE}
-            className="p-1.5 text-slate-300 hover:text-slate-100 hover:bg-slate-700 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="p-1.5 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             title="Zoom out"
           >
             <ZoomOut className="w-4 h-4" />
           </button>
-          <span className="px-2 text-xs text-slate-400 min-w-[3rem] text-center">
+          <span className="px-2 text-xs text-zinc-400 min-w-[3rem] text-center">
             {Math.round(scale * 100)}%
           </span>
           <button
             onClick={handleZoomIn}
             disabled={scale >= MAX_SCALE}
-            className="p-1.5 text-slate-300 hover:text-slate-100 hover:bg-slate-700 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="p-1.5 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             title="Zoom in"
           >
             <ZoomIn className="w-4 h-4" />
           </button>
-          <div className="w-px h-4 bg-slate-700 mx-1" />
+          <div className="w-px h-4 bg-zinc-700 mx-1" />
           <button
             onClick={handleResetZoom}
             disabled={scale === 1}
-            className="p-1.5 text-slate-300 hover:text-slate-100 hover:bg-slate-700 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            className="p-1.5 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-700 rounded disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             title="Reset zoom"
           >
             <RotateCcw className="w-4 h-4" />
@@ -230,7 +230,7 @@ const MermaidRenderer: React.FC<MermaidRendererProps> = ({ code }) => {
       {/* Diagram Container */}
       <div
         ref={containerRef}
-        className="flex-1 overflow-auto bg-slate-900"
+        className="flex-1 overflow-auto bg-zinc-900"
         style={{
           position: 'relative',
         }}
@@ -255,10 +255,10 @@ const MermaidRenderer: React.FC<MermaidRendererProps> = ({ code }) => {
             }}
           >
             {error ? (
-              <div className="text-red-400 p-4 text-sm bg-slate-800/50 border border-red-900/50 rounded-lg max-w-2xl">
+              <div className="text-red-400 p-4 text-sm bg-zinc-800/50 border border-red-900/50 rounded-lg max-w-2xl">
                 <div className="font-semibold mb-2">Error rendering diagram:</div>
                 <div className="text-red-300">{error}</div>
-                <div className="mt-3 text-xs text-slate-400">
+                <div className="mt-3 text-xs text-zinc-400">
                   The generated Mermaid code may be invalid. Please try rephrasing your request.
                 </div>
               </div>
