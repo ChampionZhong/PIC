@@ -152,7 +152,7 @@ function App() {
     if (!mermaidCode.trim()) return;
 
     setIsGeneratingSchema(true);
-    addChatMessage('User', 'Generate visual schema from this Mermaid diagram');
+    addChatMessage('User', 'Create visual schema and style description from this Mermaid diagram');
 
     try {
       // Build chat history for API
@@ -168,8 +168,9 @@ function App() {
       if (imageUrl) currentArtifacts.image_url = imageUrl;
 
       // Use unified API with style parameters
+      // Use explicit message to help Manager route correctly to art_director
       const requestBody: any = {
-        message: 'Generate visual schema from this Mermaid diagram',
+        message: 'Create visual schema and style description from this Mermaid diagram. I want to design the visual style, colors, and layout.',
         history: apiHistory,
         active_tab: 'logic',
         current_artifacts: currentArtifacts,

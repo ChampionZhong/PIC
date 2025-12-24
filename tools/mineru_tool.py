@@ -42,21 +42,92 @@ except ImportError:
 
 
 # ---------------------------------------
-# Helper functions for MinerU API
+# Helper functions for MinerU configuration
 # ---------------------------------------
 
-def _get_mineru_api_config():
-    """Get MinerU API configuration from environment variables"""
+def _get_mineru_config():
+    """
+    Get MinerU configuration from environment variables.
+    Supports three modes:
+    1. MinerU API mode (MINERU_API_KEY + MINERU_API_URL)
+    2. MinerUClient with http-client backend
+    3. MinerUClient with vllm-engine backend
+    
+    Returns:
+        dict with config keys: api_key, api_url, use_api, backend, server_url, model_name, handle_equation_block
+    """
+    # Check for MinerU API mode (external API service)
     api_key = os.getenv("MINERU_API_KEY", "")
     api_url = os.getenv("MINERU_API_URL", "")
     use_api = bool(api_key and api_url)
-    return api_key, api_url, use_api
+    
+    # Check for MinerUClient mode (local or remote vllm/http service)
+    backend = os.getenv("MINERU_BACKEND", "http-client")  # Default to http-client
+    server_url = os.getenv("MINERU_SERVER_URL", "")
+    model_name = os.getenv("MINERU_MODEL_NAME", "mineru_vl_2509")
+    handle_equation_block_str = os.getenv("MINERU_HANDLE_EQUATION_BLOCK", "false")
+    handle_equation_block = handle_equation_block_str.lower() in ("true", "1", "yes")
+    
+    # Determine which mode to use
+    # Priority: API mode > MinerUClient mode
+    use_mineru_client = bool(server_url) and not use_api
+    
+    return {
+        "api_key": api_key,
+        "api_url": api_url,
+        "use_api": use_api,
+        "use_mineru_client": use_mineru_client,
+        "backend": backend,
+        "server_url": server_url,
+        "model_name": model_name,
+        "handle_equation_block": handle_equation_block,
+    }
+
+
+def _get_mineru_api_config():
+    """Get MinerU API configuration (backward compatibility)"""
+    config = _get_mineru_config()
+    return config["api_key"], config["api_url"], config["use_api"]
 
 
 def _encode_image_to_base64(image_path: str) -> str:
     """Encode image to base64 string"""
     with open(image_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
+
+
+class _NoProxyContext:
+    """
+    Context manager to temporarily disable proxy environment variables.
+    
+    This ensures MinerUClient (which uses httpx internally) does not use proxy settings.
+    httpx clients read proxy settings from environment variables during initialization,
+    so we must disable proxy BEFORE creating the client and keep it disabled throughout
+    the client's lifetime.
+    """
+    def __init__(self):
+        self.proxy_vars = [
+            "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+            "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"
+        ]
+        self.saved_values = {}
+    
+    def __enter__(self):
+        # Save current proxy environment variables
+        for var in self.proxy_vars:
+            self.saved_values[var] = os.environ.get(var)
+            # Remove proxy environment variables to disable proxy
+            if var in os.environ:
+                del os.environ[var]
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restore original proxy environment variables
+        for var, value in self.saved_values.items():
+            if value is not None:
+                os.environ[var] = value
+            elif var in os.environ:
+                del os.environ[var]
 
 
 async def _call_mineru_api_async(image_path: str) -> List[Dict[str, Any]]:
@@ -69,13 +140,16 @@ async def _call_mineru_api_async(image_path: str) -> List[Dict[str, Any]]:
     Returns:
         List of blocks with type, bbox, text, etc.
     """
-    api_key, api_url, use_api = _get_mineru_api_config()
+    config = _get_mineru_config()
     
-    if not use_api:
+    if not config["use_api"]:
         raise ValueError(
             "MINERU_API_KEY and MINERU_API_URL must be set in environment variables. "
             "Please configure them in .env file."
         )
+    
+    api_key = config["api_key"]
+    api_url = config["api_url"]
     
     # Encode image to base64
     image_b64 = _encode_image_to_base64(image_path)
@@ -89,7 +163,12 @@ async def _call_mineru_api_async(image_path: str) -> List[Dict[str, Any]]:
     # According to MinerU API docs (https://mineru.net/apiManage/docs)
     # Try multiple request formats to support different API versions
     
-    async with httpx.AsyncClient(timeout=300.0) as client:
+    # Disable proxy for MinerU API calls (MinerU should not go through proxy)
+    async with httpx.AsyncClient(
+        timeout=300.0,
+        proxies=None,  # Explicitly disable proxy
+        trust_env=False,  # Don't read proxy from environment variables
+    ) as client:
         try:
             # Method 1: Try multipart/form-data with file upload
             try:
@@ -135,7 +214,7 @@ async def _call_mineru_api_async(image_path: str) -> List[Dict[str, Any]]:
                         # Check if it's a task-based API
                         if "task_id" in result.get("data", {}):
                             task_id = result["data"]["task_id"]
-                            return await _poll_mineru_task(client, api_url, task_id, headers)
+                            return await _poll_mineru_task(api_url, task_id, headers)
                         else:
                             return _extract_blocks_from_response(result)
                 except Exception as e2:
@@ -180,7 +259,6 @@ def _extract_blocks_from_response(result: dict) -> List[Dict[str, Any]]:
 
 
 async def _poll_mineru_task(
-    client: httpx.AsyncClient,
     api_url: str,
     task_id: str,
     headers: dict,
@@ -191,27 +269,33 @@ async def _poll_mineru_task(
     task_result_url = f"{api_url.rstrip('/')}/{task_id}"
     start_time = time.time()
     
-    while time.time() - start_time < max_wait_time:
-        await asyncio.sleep(poll_interval)
-        
-        response = await client.get(task_result_url, headers=headers)
-        response.raise_for_status()
-        task_result = response.json()
-        
-        if task_result.get("code") == 0:
-            task_data = task_result.get("data", {})
-            task_state = task_data.get("state")
+    # Disable proxy for MinerU API calls
+    async with httpx.AsyncClient(
+        timeout=300.0,
+        proxies=None,  # Explicitly disable proxy
+        trust_env=False,  # Don't read proxy from environment variables
+    ) as client:
+        while time.time() - start_time < max_wait_time:
+            await asyncio.sleep(poll_interval)
             
-            if task_state == "done":
-                return _extract_blocks_from_response(task_data)
-            elif task_state == "failed":
-                err_msg = task_data.get("err_msg", "Unknown error")
-                raise RuntimeError(f"MinerU task failed: {err_msg}")
-            # Continue polling if state is "processing" or "pending"
-        else:
-            raise RuntimeError(f"MinerU API error: {task_result.get('msg', 'Unknown error')}")
-    
-    raise TimeoutError("MinerU task timeout: task did not complete within 5 minutes")
+            response = await client.get(task_result_url, headers=headers)
+            response.raise_for_status()
+            task_result = response.json()
+            
+            if task_result.get("code") == 0:
+                task_data = task_result.get("data", {})
+                task_state = task_data.get("state")
+                
+                if task_state == "done":
+                    return _extract_blocks_from_response(task_data)
+                elif task_state == "failed":
+                    err_msg = task_data.get("err_msg", "Unknown error")
+                    raise RuntimeError(f"MinerU task failed: {err_msg}")
+                # Continue polling if state is "processing" or "pending"
+            else:
+                raise RuntimeError(f"MinerU API error: {task_result.get('msg', 'Unknown error')}")
+        
+        raise TimeoutError("MinerU task timeout: task did not complete within 5 minutes")
 
 
 # ---------------------------------------
@@ -220,28 +304,50 @@ async def _poll_mineru_task(
 def run_two_step_extract(image_path: str, port: int = None):
     """
     Synchronous call to MinerU two_step_extract.
-    Supports both API mode (via MINERU_API_KEY/URL) and local service mode.
+    Supports three modes:
+    1. MinerU API mode (MINERU_API_KEY + MINERU_API_URL)
+    2. MinerUClient with http-client backend
+    3. MinerUClient with vllm-engine backend
     """
-    api_key, api_url, use_api = _get_mineru_api_config()
+    config = _get_mineru_config()
     
-    if use_api:
+    if config["use_api"]:
         # Use API mode
         return asyncio.run(_call_mineru_api_async(image_path))
-    else:
-        # Fallback to local service mode
+    elif config["use_mineru_client"]:
+        # Use MinerUClient mode
         if not MINERU_CLIENT_AVAILABLE:
             raise ValueError(
-                "Either configure MINERU_API_KEY and MINERU_API_URL, "
-                "or install mineru_vl_utils for local service mode."
+                "mineru_vl_utils is required for MinerUClient mode. "
+                "Please install it: pip install mineru-vl-utils"
+            )
+        image = Image.open(image_path)
+        # Disable proxy BEFORE creating MinerUClient (httpx reads env vars during init)
+        with _NoProxyContext():
+            client = MinerUClient(
+                model_name=config["model_name"],
+                backend=config["backend"],
+                server_url=config["server_url"],
+                handle_equation_block=config["handle_equation_block"],
+            )
+            return client.two_step_extract(image)
+    else:
+        # Fallback to legacy local service mode (for backward compatibility)
+        if not MINERU_CLIENT_AVAILABLE:
+            raise ValueError(
+                "Either configure MINERU_API_KEY/URL, MINERU_SERVER_URL, "
+                "or install mineru_vl_utils and provide port for local service mode."
             )
         if port is None:
-            raise ValueError("port is required for local service mode")
+            raise ValueError("port is required for legacy local service mode")
         image = Image.open(image_path)
-        client = MinerUClient(
-            backend="http-client",
-            server_url=f"http://127.0.0.1:{port}"
-        )
-        return client.two_step_extract(image)
+        # Disable proxy BEFORE creating MinerUClient (httpx reads env vars during init)
+        with _NoProxyContext():
+            client = MinerUClient(
+                backend="http-client",
+                server_url=f"http://127.0.0.1:{port}"
+            )
+            return client.two_step_extract(image)
 
 
 # ---------------------------------------
@@ -250,54 +356,184 @@ def run_two_step_extract(image_path: str, port: int = None):
 def run_batch_two_step_extract(image_paths: list[str], port: int):
     """同步批量调用 MinerU two_step_extract，处理多张图片并返回结果列表。"""
     images = [Image.open(p) for p in image_paths]
-    client = MinerUClient(
-        backend="http-client",
-        server_url=f"http://127.0.0.1:{port}"
-    )
-    return client.batch_two_step_extract(images)
+    # Disable proxy BEFORE creating MinerUClient (httpx reads env vars during init)
+    with _NoProxyContext():
+        client = MinerUClient(
+            backend="http-client",
+            server_url=f"http://127.0.0.1:{port}"
+        )
+        return client.batch_two_step_extract(images)
 
 
 # ---------------------------------------
 # 3. aio_two_step_extract (async)
 # ---------------------------------------
-async def run_aio_two_step_extract(image_path: str, port: int = None):
+async def run_aio_two_step_extract(image_path: str, port: int = None, max_retries: int = 3, retry_delay: float = 2.0):
     """
-    Async call to MinerU two_step_extract.
-    Supports both API mode (via MINERU_API_KEY/URL) and local service mode.
-    """
-    api_key, api_url, use_api = _get_mineru_api_config()
+    Async call to MinerU two_step_extract with retry mechanism.
+    Supports three modes:
+    1. MinerU API mode (MINERU_API_KEY + MINERU_API_URL)
+    2. MinerUClient with http-client backend
+    3. MinerUClient with vllm-engine backend
     
-    if use_api:
-        # Use API mode
-        return await _call_mineru_api_async(image_path)
-    else:
-        # Fallback to local service mode
+    Args:
+        image_path: Path to the image to process
+        port: Optional port for legacy local service mode
+        max_retries: Maximum number of retries for transient errors (default: 3)
+        retry_delay: Delay between retries in seconds (default: 2.0)
+    """
+    import asyncio
+    
+    config = _get_mineru_config()
+    
+    if config["use_api"]:
+        # Use API mode with retry
+        for attempt in range(max_retries):
+            try:
+                return await _call_mineru_api_async(image_path)
+            except Exception as e:
+                if attempt < max_retries - 1 and _is_retryable_error(e):
+                    print(f"[run_aio_two_step_extract] Retryable error (attempt {attempt + 1}/{max_retries}): {e}")
+                    await asyncio.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                    continue
+                raise
+    elif config["use_mineru_client"]:
+        # Use MinerUClient mode with retry
         if not MINERU_CLIENT_AVAILABLE:
             raise ValueError(
-                "Either configure MINERU_API_KEY and MINERU_API_URL, "
-                "or install mineru_vl_utils for local service mode."
+                "mineru_vl_utils is required for MinerUClient mode. "
+                "Please install it: pip install mineru-vl-utils"
+            )
+        image = Image.open(image_path)
+        
+        # Disable proxy BEFORE creating MinerUClient (httpx reads env vars during init)
+        with _NoProxyContext():
+            client = MinerUClient(
+                model_name=config["model_name"],
+                backend=config["backend"],
+                server_url=config["server_url"],
+                handle_equation_block=config["handle_equation_block"],
+            )
+            
+            # Retry logic for MinerUClient (proxy remains disabled throughout)
+            for attempt in range(max_retries):
+                try:
+                    return await client.aio_two_step_extract(image)
+                except Exception as e:
+                    if attempt < max_retries - 1 and _is_retryable_error(e):
+                        print(f"[run_aio_two_step_extract] Retryable error (attempt {attempt + 1}/{max_retries}): {e}")
+                        await asyncio.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                        continue
+                    raise
+    else:
+        # Fallback to legacy local service mode (for backward compatibility)
+        if not MINERU_CLIENT_AVAILABLE:
+            raise ValueError(
+                "Either configure MINERU_API_KEY/URL, MINERU_SERVER_URL, "
+                "or install mineru_vl_utils and provide port for local service mode."
             )
         if port is None:
-            raise ValueError("port is required for local service mode")
+            raise ValueError("port is required for legacy local service mode")
         image = Image.open(image_path)
-        client = MinerUClient(
-            backend="http-client",
-            server_url=f"http://127.0.0.1:{port}"
-        )
-        return await client.aio_two_step_extract(image)
+        
+        # Disable proxy BEFORE creating MinerUClient (httpx reads env vars during init)
+        with _NoProxyContext():
+            client = MinerUClient(
+                backend="http-client",
+                server_url=f"http://127.0.0.1:{port}"
+            )
+            
+            # Retry logic for legacy local service mode (proxy remains disabled throughout)
+            for attempt in range(max_retries):
+                try:
+                    return await client.aio_two_step_extract(image)
+                except Exception as e:
+                    if attempt < max_retries - 1 and _is_retryable_error(e):
+                        print(f"[run_aio_two_step_extract] Retryable error (attempt {attempt + 1}/{max_retries}): {e}")
+                        await asyncio.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                        continue
+                    raise
+
+
+def _is_retryable_error(error: Exception) -> bool:
+    """
+    Check if an error is retryable (e.g., 502 Bad Gateway, 503 Service Unavailable).
+    
+    Args:
+        error: The exception to check
+        
+    Returns:
+        True if the error is retryable, False otherwise
+    """
+    error_str = str(error).lower()
+    retryable_status_codes = ["502", "503", "504", "429"]  # Bad Gateway, Service Unavailable, Gateway Timeout, Too Many Requests
+    
+    # Check for retryable status codes in error message
+    for code in retryable_status_codes:
+        if code in error_str:
+            return True
+    
+    # Check for connection errors
+    if "connection" in error_str or "timeout" in error_str:
+        return True
+    
+    # Check if it's a ServerError from mineru_vl_utils
+    try:
+        from mineru_vl_utils.vlm_client.base_client import ServerError
+        if isinstance(error, ServerError):
+            # Check status code if available
+            if hasattr(error, "status_code"):
+                return error.status_code in [502, 503, 504, 429]
+            # Otherwise check error message
+            return any(code in str(error) for code in retryable_status_codes)
+    except ImportError:
+        pass
+    
+    return False
 
 
 # ---------------------------------------
 # 4. aio_batch_two_step_extract (async)
 # ---------------------------------------
-async def run_aio_batch_two_step_extract(image_paths: list[str], port: int):
-    """异步批量调用 MinerU two_step_extract，处理多张图片并返回结果列表。"""
+async def run_aio_batch_two_step_extract(image_paths: list[str], port: int = None):
+    """
+    Async batch call to MinerU two_step_extract.
+    Supports three modes:
+    1. MinerU API mode (MINERU_API_KEY + MINERU_API_URL)
+    2. MinerUClient with http-client backend
+    3. MinerUClient with vllm-engine backend
+    """
+    config = _get_mineru_config()
     images = [Image.open(p) for p in image_paths]
-    client = MinerUClient(
-        backend="http-client",
-        server_url=f"http://127.0.0.1:{port}"
-    )
-    return await client.aio_batch_two_step_extract(images)
+    
+    if config["use_mineru_client"]:
+        if not MINERU_CLIENT_AVAILABLE:
+            raise ValueError(
+                "mineru_vl_utils is required for MinerUClient mode. "
+                "Please install it: pip install mineru-vl-utils"
+            )
+        # Disable proxy BEFORE creating MinerUClient (httpx reads env vars during init)
+        with _NoProxyContext():
+            client = MinerUClient(
+                model_name=config["model_name"],
+                backend=config["backend"],
+                server_url=config["server_url"],
+                handle_equation_block=config["handle_equation_block"],
+            )
+            return await client.aio_batch_two_step_extract(images)
+    else:
+        # Fallback to legacy local service mode
+        if not MINERU_CLIENT_AVAILABLE:
+            raise ValueError("mineru_vl_utils is required")
+        if port is None:
+            raise ValueError("port is required for legacy local service mode")
+        # Disable proxy BEFORE creating MinerUClient (httpx reads env vars during init)
+        with _NoProxyContext():
+            client = MinerUClient(
+                backend="http-client",
+                server_url=f"http://127.0.0.1:{port}"
+            )
+            return await client.aio_batch_two_step_extract(images)
 
 
 # ---------------------------------------
@@ -515,7 +751,8 @@ def svg_to_emf(svg_path: str, emf_path: str, dpi: int = 600) -> str:
 
     依赖
     ----
-    - 系统需安装 Inkscape，并且 `inkscape` 在 PATH 中可直接调用。
+    - 优先使用项目目录下的 Inkscape appimage (./models/Inkscape/)
+    - 如果不存在，则使用系统 PATH 中的 `inkscape` 命令
 
     参数
     ----
@@ -536,6 +773,8 @@ def svg_to_emf(svg_path: str, emf_path: str, dpi: int = 600) -> str:
     RuntimeError
         当 Inkscape 调用失败或未生成输出文件时。
     """
+    from utils import get_project_root
+    
     svg_p = Path(svg_path)
     if not svg_p.exists():
         raise FileNotFoundError(f"输入 SVG 不存在: {svg_p}")
@@ -543,11 +782,24 @@ def svg_to_emf(svg_path: str, emf_path: str, dpi: int = 600) -> str:
     emf_p = Path(emf_path)
     emf_p.parent.mkdir(parents=True, exist_ok=True)
 
+    # Try to find Inkscape appimage in project directory first
+    inkscape_cmd = None
+    project_root = get_project_root()
+    inkscape_appimage = project_root / "models" / "Inkscape" / "Inkscape-ebf0e94-x86_64.AppImage"
+    
+    if inkscape_appimage.exists():
+        # Make sure appimage is executable
+        os.chmod(inkscape_appimage, 0o755)
+        inkscape_cmd = str(inkscape_appimage)
+    else:
+        # Fallback to system inkscape
+        inkscape_cmd = "inkscape"
+
     try:
         # inkscape input.svg --export-filename=output.emf
         result = subprocess.run(
             [
-                "inkscape",
+                inkscape_cmd,
                 str(svg_p),
                 "--export-filename",
                 str(emf_p),
@@ -560,13 +812,16 @@ def svg_to_emf(svg_path: str, emf_path: str, dpi: int = 600) -> str:
         )
     except FileNotFoundError as e:
         raise RuntimeError(
-            "调用 Inkscape 失败：系统中可能未安装 `inkscape` 可执行文件，"
-            "请先安装 Inkscape 并确保其在 PATH 中。"
+            f"调用 Inkscape 失败：未找到 Inkscape 可执行文件。\n"
+            f"已尝试路径: {inkscape_appimage}\n"
+            f"请确保 Inkscape appimage 存在于 ./models/Inkscape/ 目录，"
+            f"或在系统 PATH 中安装 Inkscape。"
         ) from e
 
     if result.returncode != 0:
         raise RuntimeError(
             f"Inkscape 转换失败，返回码 {result.returncode}：\n"
+            f"使用的命令: {inkscape_cmd}\n"
             f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
         )
 

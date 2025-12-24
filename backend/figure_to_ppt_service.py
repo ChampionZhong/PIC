@@ -11,7 +11,7 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 from PIL import Image
 from pptx import Presentation
-from pptx.util import Inches, pixels_to_inches
+from pptx.util import Inches
 from pptx.dml.color import RGBColor
 
 from utils import (
@@ -191,12 +191,18 @@ async def process_mask_generator(state: FigureToPPTState) -> FigureToPPTState:
     log.info(f"[process_mask_generator] mask_detail_level: {state.mask_detail_level}")
     
     # Check MinerU configuration
-    from tools.mineru_tool import _get_mineru_api_config
-    api_key, api_url, use_api = _get_mineru_api_config()
-    if use_api:
-        log.info(f"[process_mask_generator] Using MinerU API mode: {api_url}")
+    from tools.mineru_tool import _get_mineru_config
+    config = _get_mineru_config()
+    if config["use_api"]:
+        log.info(f"[process_mask_generator] Using MinerU API mode: {config['api_url']}")
+    elif config["use_mineru_client"]:
+        log.info(
+            f"[process_mask_generator] Using MinerUClient mode: "
+            f"backend={config['backend']}, server_url={config['server_url']}, "
+            f"model_name={config['model_name']}"
+        )
     else:
-        log.info(f"[process_mask_generator] Using MinerU local service mode, port: {state.mineru_port}")
+        log.info(f"[process_mask_generator] Using MinerU legacy local service mode, port: {state.mineru_port}")
         if state.mineru_port is None:
             state.mineru_port = 8002  # Default port
     

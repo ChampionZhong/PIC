@@ -4,3 +4,4 @@ __pycache__
 models/
 sources/
 test/
+backend/*.sh

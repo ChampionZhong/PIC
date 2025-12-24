@@ -1,12 +1,14 @@
 """
-FastAPI backend for AI Research Figure Generator - Multi-Agent Workflow
+Backend for Paper Illustration Copilot - Multi-Agent Workflow
 """
 import os
+import sys
 import base64
 import json
 import asyncio
 import requests
 import google.generativeai as genai
+from pathlib import Path
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -15,6 +17,11 @@ from pydantic import BaseModel, Field
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 try:
     from prompts import (
@@ -29,16 +36,29 @@ try:
     )
 except ImportError:
     # Fallback if running as module
-    from backend.prompts import (
-        MANAGER_SYSTEM_PROMPT,
-        ARCHITECT_SYSTEM_PROMPT,
-        DIRECTOR_SYSTEM_PROMPT_TEMPLATE,
-        CRITIC_SYSTEM_PROMPT,
-        LOGIC_CRITIC_SYSTEM_PROMPT,
-        STYLE_CRITIC_SYSTEM_PROMPT,
-        RESULT_CRITIC_SYSTEM_PROMPT,
-        STYLE_PRESETS
-    )
+    try:
+        from backend.prompts import (
+            MANAGER_SYSTEM_PROMPT,
+            ARCHITECT_SYSTEM_PROMPT,
+            DIRECTOR_SYSTEM_PROMPT_TEMPLATE,
+            CRITIC_SYSTEM_PROMPT,
+            LOGIC_CRITIC_SYSTEM_PROMPT,
+            STYLE_CRITIC_SYSTEM_PROMPT,
+            RESULT_CRITIC_SYSTEM_PROMPT,
+            STYLE_PRESETS
+        )
+    except ImportError:
+        # Last resort: try relative import
+        from .prompts import (
+            MANAGER_SYSTEM_PROMPT,
+            ARCHITECT_SYSTEM_PROMPT,
+            DIRECTOR_SYSTEM_PROMPT_TEMPLATE,
+            CRITIC_SYSTEM_PROMPT,
+            LOGIC_CRITIC_SYSTEM_PROMPT,
+            STYLE_CRITIC_SYSTEM_PROMPT,
+            RESULT_CRITIC_SYSTEM_PROMPT,
+            STYLE_PRESETS
+        )
 
 GEMINI_AVAILABLE = True
 
@@ -49,12 +69,22 @@ load_dotenv()
 app = FastAPI(title="AI Research Figure Generator API - Multi-Agent Workflow")
 
 # Enable CORS for React frontend
+# Allow all origins in development, restrict in production
+cors_origins_str = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:8001,http://localhost:3000,http://127.0.0.1:8001,http://127.0.0.1:3000"
+)
+# Split and strip whitespace from each origin
+cors_origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8001"],
+    allow_origins=cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
 
 # Get OpenAI configuration from environment
@@ -162,6 +192,8 @@ class ChatRequest(BaseModel):
     history: List[dict] = Field(default=[], description="Chat history")
     active_tab: Optional[str] = Field(default=None, description="Current active tab: 'logic' | 'style' | 'result'")
     current_artifacts: Optional[dict] = Field(default_factory=dict, description="Current artifacts: {mermaid_code, visual_schema, image_url}")
+    style_mode: Optional[str] = Field(default=None, description="Style mode for Art Director")
+    custom_style_prompt: Optional[str] = Field(default=None, description="Custom style prompt for Art Director")
     style_mode: Optional[str] = Field(default="AI_CONFERENCE", description="Style preset: AI_CONFERENCE, TOP_JOURNAL, ENGINEERING, or CUSTOM")
     custom_style_prompt: Optional[str] = Field(default=None, description="Custom style prompt (only used if style_mode is CUSTOM)")
 
@@ -215,7 +247,7 @@ Current System State:
         # Run synchronous OpenAI call in thread pool to avoid blocking
         response = await asyncio.to_thread(
             openai_client.chat.completions.create,
-            model="gpt-5.1",
+            model="gpt-5.2",
             messages=messages,
             temperature=0.3,
             response_format={"type": "json_object"}  # Force JSON response
@@ -284,7 +316,7 @@ async def run_architect(idea: str) -> LogicResponse:
         # Run synchronous OpenAI call in thread pool to avoid blocking
         response = await asyncio.to_thread(
             openai_client.chat.completions.create,
-            model="gpt-5.1",  # Can be overridden via env
+            model="gpt-5.2",  # Can be overridden via env
             messages=messages,
             temperature=0.7,
         )
@@ -356,7 +388,7 @@ async def run_art_director(
     if not openai_client:
         # Mock response if API key is missing
         return StyleResponse(
-            visual_schema="[Style & Meta-Instructions]\nHigh-fidelity scientific schematic, clean white background.\n\n[LAYOUT CONFIGURATION]\n* Selected Layout: Linear\n* Composition Logic: Left to right flow\n* Color Palette: Azure Blue, Coral Orange, Slate Grey"
+            visual_schema="[Style & Meta-Instructions]\nHigh-fidelity scientific schematic, clean white background.\n\n[LAYOUT CONFIGURATION]\n* Selected Layout: Linear\n* Composition Logic: Left to right flow\n*"
         )
     
     try:
@@ -397,7 +429,7 @@ async def run_art_director(
         # Run synchronous OpenAI call in thread pool to avoid blocking
         response = await asyncio.to_thread(
             openai_client.chat.completions.create,
-            model="gpt-5.1",
+            model="gpt-5.2",
             messages=messages,
             temperature=0.7,
         )
@@ -528,8 +560,7 @@ async def run_painter(visual_schema: str) -> PaintResponse:
                     }],
                     "generationConfig": {
                         "responseModalities": [
-                            "TEXT",
-                            "IMAGE"
+                            "IMAGE"  # Request only IMAGE, not TEXT, to avoid getting thoughts
                         ],
                         "imageConfig": {
                             "aspectRatio": "16:9",
@@ -608,20 +639,47 @@ async def run_painter(visual_schema: str) -> PaintResponse:
                 # Extract image data
                 image_data_b64 = None
                 mime_type = "image/png"
+                text_parts = []
+                thought_parts = []
+                
                 for part in parts:
                     if "inlineData" in part:
                         image_data_b64 = part["inlineData"]["data"]
                         mime_type = part["inlineData"].get("mimeType", "image/png")
                         break
+                    elif "text" in part:
+                        text_content = part.get("text", "")
+                        if part.get("thought", False):
+                            thought_parts.append(text_content)
+                        else:
+                            text_parts.append(text_content)
                 
                 if image_data_b64:
                     image_url = f"data:{mime_type};base64,{image_data_b64}"
                     return PaintResponse(image_url=image_url)
                 else:
-                    raise Exception(
-                        f"No image data found in response parts.\n"
-                        f"Parts: {json.dumps(parts, indent=2)[:1000]}..."
-                    )
+                    # Check if we got thoughts but no image - this might be a streaming response
+                    if thought_parts:
+                        error_msg = (
+                            f"Gemini API returned thinking process but no image yet. "
+                            f"This might be a streaming response that needs more time.\n\n"
+                            f"Thoughts received:\n" + "\n".join(thought_parts[:3]) + "\n\n"
+                            f"Total parts: {len(parts)}, Text parts: {len(text_parts)}, Thought parts: {len(thought_parts)}\n\n"
+                            f"Please try again or check if the API supports streaming responses."
+                        )
+                    elif text_parts:
+                        error_msg = (
+                            f"Gemini API returned text response instead of image.\n\n"
+                            f"Text received:\n" + "\n".join(text_parts[:2]) + "\n\n"
+                            f"This might indicate the API is still processing or the prompt needs adjustment."
+                        )
+                    else:
+                        error_msg = (
+                            f"No image data found in response parts.\n"
+                            f"Parts structure: {json.dumps(parts[:2], indent=2) if parts else 'No parts'}..."
+                        )
+                    
+                    raise Exception(error_msg)
                     
             except Exception as gemini_error:
                 http_api_failed = True
@@ -775,7 +833,7 @@ async def run_critic(image_url: str, original_idea: str) -> CritiqueResponse:
         ]
         
         # Try vision-capable models (gpt-4o, gpt-4-vision-preview)
-        # Note: gpt-5.1 may not support vision, so we'll try it last
+        # Note: gpt-5.2 may not support vision, so we'll try it last
         vision_models = ["gpt-4o", "gpt-4-vision-preview"]
         response = None
         last_error = None
@@ -806,7 +864,7 @@ async def run_critic(image_url: str, original_idea: str) -> CritiqueResponse:
             # Run synchronous OpenAI call in thread pool to avoid blocking
             response = await asyncio.to_thread(
                 openai_client.chat.completions.create,
-                model="gpt-5.1",
+                model="gpt-5.2",
                 messages=messages,
                 temperature=0.5,
             )
@@ -871,7 +929,7 @@ async def run_logic_critic(mermaid_code: str, original_idea: Optional[str] = Non
         # Run synchronous OpenAI call in thread pool to avoid blocking
         response = await asyncio.to_thread(
             openai_client.chat.completions.create,
-            model="gpt-5.1",
+            model="gpt-5.2",
             messages=messages,
             temperature=0.5,
         )
@@ -943,7 +1001,7 @@ async def run_style_critic(visual_schema: str, mermaid_code: Optional[str] = Non
         # Run synchronous OpenAI call in thread pool to avoid blocking
         response = await asyncio.to_thread(
             openai_client.chat.completions.create,
-            model="gpt-5.1",
+            model="gpt-5.2",
             messages=messages,
             temperature=0.5,
         )
@@ -1092,7 +1150,7 @@ async def run_result_critic(image_url: str, original_idea: str, visual_schema: O
             # Run synchronous OpenAI call in thread pool to avoid blocking
             response = await asyncio.to_thread(
                 openai_client.chat.completions.create,
-                model="gpt-5.1",
+                model="gpt-5.2",
                 messages=messages,
                 temperature=0.5,
             )
@@ -1186,8 +1244,18 @@ async def chat_endpoint(request: ChatRequest):
             # Painter: needs visual_schema from artifacts
             visual_schema = request.current_artifacts.get("visual_schema", "")
             if not visual_schema:
-                response_text = "Please generate a visual schema first using the Art Director."
-                updated_artifacts = {}
+                # If no visual schema but we have mermaid_code, route to art_director instead
+                mermaid_code = request.current_artifacts.get("mermaid_code", "")
+                if mermaid_code:
+                    # Force route to art_director
+                    style_mode = request.style_mode or "AI_CONFERENCE"
+                    custom_style_prompt = request.custom_style_prompt
+                    result = await run_art_director(mermaid_code, request.message, style_mode, custom_style_prompt)
+                    response_text = f"I've generated the visual schema from the Mermaid diagram."
+                    updated_artifacts["visual_schema"] = result.visual_schema
+                else:
+                    response_text = "Please generate a visual schema first using the Art Director."
+                    updated_artifacts = {}
             else:
                 result = await run_painter(visual_schema)
                 response_text = "Image generated successfully!"
@@ -1387,7 +1455,14 @@ async def figure_to_ppt_endpoint(
     """
     import tempfile
     import shutil
+    import sys
     from pathlib import Path
+    
+    # Add project root to path if not already there
+    project_root = Path(__file__).parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    
     from backend.figure_to_ppt_service import run_figure_to_ppt_pipeline_with_auto_layout
     from utils.logger import get_logger
     

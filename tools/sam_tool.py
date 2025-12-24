@@ -211,11 +211,11 @@ def free_sam_model(checkpoint: str = "sam_b.pt") -> None:
 def run_sam_auto(
     image_path: str,
     checkpoint: str = "sam_b.pt",
-    device: str = "cuda",
+    device: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Run automatic segmentation on a single image using SAM (ultralytics backend).
-
+    
     Parameters
     ----------
     image_path : str
@@ -223,7 +223,7 @@ def run_sam_auto(
     checkpoint : str, optional
         SAM checkpoint to use, by default "sam_b.pt".
     device : str, optional
-        Device string for torch (e.g. "cuda", "cpu"), by default "cuda".
+        Device string for torch (e.g. "cuda", "cpu"). If None, auto-detects CUDA availability.
 
     Returns
     -------
@@ -234,6 +234,14 @@ def run_sam_auto(
             - score: float or None
             - area: int (number of True pixels in mask)
     """
+    # Auto-detect device if not specified
+    if device is None:
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+    
     model = _get_sam_model(checkpoint=checkpoint)
     # In recent ultralytics versions, SAM models can receive `device` at call time.
     # If your installed version does not support this, you can remove `device=device`.
@@ -299,7 +307,7 @@ def run_sam_auto(
 def run_sam_auto_batch(
     image_paths: List[str],
     checkpoint: str = "sam_b.pt",
-    device: str = "cuda",
+    device: Optional[str] = None,
 ) -> List[List[Dict[str, Any]]]:
     """
     Batch automatic segmentation using SAM.
@@ -311,7 +319,7 @@ def run_sam_auto_batch(
     checkpoint : str, optional
         SAM checkpoint to use, by default "sam_b.pt".
     device : str, optional
-        Device string, by default "cuda".
+        Device string. If None, auto-detects CUDA availability.
 
     Returns
     -------
@@ -1082,7 +1090,7 @@ def segment_layout_boxes(
     image_path: str,
     output_dir: str,
     checkpoint: str = "sam_b.pt",
-    device: str = "cuda",
+    device: Optional[str] = None,
     min_area: int = 0,
     min_score: float = 0.0,
     iou_threshold: float = 0.5,
@@ -1092,11 +1100,19 @@ def segment_layout_boxes(
     """
     针对空框模板图做 SAM 分割，过滤 + NMS + 裁剪，返回每个框的 bbox + patch PNG 路径。
 
-    该函数主要服务于 paper2figure_with_sam 工作流中的“背景框架层”生成：
+    该函数主要服务于 paper2figure_with_sam 工作流中的"背景框架层"生成：
     - 输入为二次编辑后的空框模板图（fig_layout_path）；
     - 不关心具体语义，只需要稳定的矩形/箭头布局；
     - 输出 items 将在后续被转换为 SVG / EMF 并按 bbox 映射回 PPT。
     """
+    # Auto-detect device if not specified
+    if device is None:
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            device = "cpu"
+    
     # 1) SAM 自动分割
     items = run_sam_auto(image_path, checkpoint=checkpoint, device=device)
 
